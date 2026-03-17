@@ -1,0 +1,16 @@
+name = "writing-tracker-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "writing-tracker"
+database_id = "ae2330c8-3935-4ae5-b12d-544d1f40a623"
+
+[vars]
+APP_URL = "https://stats.wkrustbooks.com"
+FROM_EMAIL = "noreply@REPLACE_WITH_YOUR_DOMAIN"
+
+# Set these secrets with:
+#   wrangler secret put RESEND_API_KEY

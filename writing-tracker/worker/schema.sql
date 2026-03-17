@@ -1,0 +1,43 @@
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key_hash TEXT NOT NULL,
+  key_prefix TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT 'Default',
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS daily_stats (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  project TEXT NOT NULL DEFAULT 'default',
+  word_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(user_id, date, project)
+);
+
+CREATE TABLE IF NOT EXISTS targets (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  monthly_target INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reset_tokens (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at INTEGER NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0
+);

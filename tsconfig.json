@@ -19,5 +19,5 @@
     "skipLibCheck": true
   },
   "include": ["**/*.ts", "**/*.tsx", "tests/**/*.ts"],
-  "exclude": ["node_modules", "main.js", "coverage"]
+  "exclude": ["node_modules", "main.js", "coverage", "writing-tracker"]
 }

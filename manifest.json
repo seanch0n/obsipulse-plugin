@@ -1,10 +1,9 @@
 {
-  "id": "yourpulse",
-  "name": "YourPulse - Your Writing Activity Visualised",
-  "version": "2.4.0",
+  "id": "writing-tracker",
+  "name": "Writing Tracker",
+  "version": "1.0.0",
   "minAppVersion": "0.15.0",
-  "description": "It's like your Github profile, but for your vault (featuring daily streak, average daily word count, comprehensive stats and plugins overview).",
-  "author": "Jiri Sifalda (@jsifalda)",
-  "authorUrl": "https://github.com/jsifalda",
+  "description": "Track your daily writing stats by project and sync them to your own backend.",
+  "author": "Sean",
   "isDesktopOnly": false
 }

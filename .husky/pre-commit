@@ -1,2 +1,2 @@
-yarn lint-staged
-yarn test:coverage
+npx lint-staged
+npm run test:coverage

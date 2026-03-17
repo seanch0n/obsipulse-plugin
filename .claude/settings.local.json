@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(yarn install:*)",
+      "Bash(npm install:*)",
+      "Bash(node_modules/.bin/rollup --config rollup.config.js 2>&1 | tail -30)",
+      "Bash(ls:*)",
+      "Bash(node_modules/.bin/rollup --config rollup.config.js 2>&1 | grep -v \"writing-tracker/worker\" | grep -E \"error|Error|created|Plugin typescript\")",
+      "Bash(node_modules/.bin/rollup --config rollup.config.js 2>&1 | tail -5)",
+      "Bash(npx wrangler:*)",
+      "Bash(VITE_API_URL=https://writing-tracker-api.sean00mcc.workers.dev npm run build 2>&1)",
+      "Bash(curl:*)",
+      "Bash(node_modules/.bin/rollup --config rollup.config.js 2>&1 | tail -3)",
+      "Bash(rm:*)",
+      "Read(//c/Users/sean/AppData/Roaming/xdg.config/.wrangler/config/**)",
+      "Read(//c/Users/sean/.wrangler/config/**)",
+      "Bash(tree:*)"
+    ]
+  }
+}

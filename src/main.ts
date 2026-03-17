@@ -7,41 +7,40 @@ import {
   PluginSettingTab,
   Setting,
   TFile,
-  addIcon,
   debounce,
   requestUrl,
 } from 'obsidian'
 import { v4 as uuidv4 } from 'uuid'
 
-import { DeviceData, YourPulseSettings } from '@/lib/types'
-import { ObsiPulseIcon } from './assets/ObsiPulseIcon'
-import { DataviewCompiler } from './compilers/DataViewCompiler'
-import { LinkedNotesCompiler } from './compilers/LinkedNotesCompiler'
-import { PrivateModeModal } from './components/PrivateModeModal'
-import { VIEW_TYPE_STATS_TRACKER } from './constants'
-import { addYpPublishUrlToFile } from './helpers/addYpPublishUrl'
-import { createProfileUrl } from './helpers/createProfileUrl'
-import { Encryption } from './helpers/Encryption'
-import { getLeaderBoardUser } from './helpers/getLeaderBoardUser'
+import { DeviceData, WritingTrackerSettings, ProjectMapping, SprintRecord } from '@/lib/types'
 import { getLocalTodayDate } from './helpers/getLocalTodayDate'
-import { hasYpPublishFileProperty } from './helpers/isYpPublish'
-import { listAllPlugins } from './helpers/listAllPlugins'
-import './styles.css'
-import { ApiInterceptor } from './utils/apiInterceptor'
+import { SprintView, SPRINT_VIEW_TYPE } from './views/SprintView'
 
-const getTimezone = (): string | undefined => {
+const getTimezone = (): string => {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone
-  } catch (e) {
-    console.error('--error getting timezone', e)
-    return undefined
+  } catch {
+    return 'UTC'
   }
 }
 
-class YourPulseSettingTab extends PluginSettingTab {
-  plugin: YourPulse
+const DEFAULT_SETTINGS: WritingTrackerSettings = {
+  serverUrl: '',
+  apiKey: '',
+  devices: {},
+  timezone: getTimezone(),
+  projects: [],
+  ignoredPaths: [],
+  statusBarStats: true,
+  locations: [],
+  defaultSprintMinutes: 25,
+  defaultSprintWords: 500,
+}
 
-  constructor(app: App, plugin: YourPulse) {
+class WritingTrackerSettingTab extends PluginSettingTab {
+  plugin: WritingTrackerPlugin
+
+  constructor(app: App, plugin: WritingTrackerPlugin) {
     super(app, plugin)
     this.plugin = plugin
   }
@@ -50,217 +49,222 @@ class YourPulseSettingTab extends PluginSettingTab {
     const { containerEl } = this
     containerEl.empty()
 
-    // Check if license key is valid
-    const isValidLicense = !!(this.plugin.settings.key && parseLicenseKey(this.plugin.settings.key))
-
-    const privateModeSetting = new Setting(containerEl)
-      .setName('Private Mode')
-      .setDesc('Hide your profile from public view and leaderboards')
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.privateMode)
-          .setDisabled(!isValidLicense)
+    new Setting(containerEl)
+      .setName('Server URL')
+      .setDesc(
+        'The base URL of your writing tracker backend (e.g. https://writing-tracker-api.workers.dev)'
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder('https://...')
+          .setValue(this.plugin.settings.serverUrl)
           .onChange(async (value) => {
-            this.plugin.settings.privateMode = value
-
+            this.plugin.settings.serverUrl = value.trim().replace(/\/$/, '')
             await this.plugin.saveSettings()
-            this.display()
           })
-      })
-
-    if (!isValidLicense) {
-      privateModeSetting.setClass('private-mode-setting')
-    }
-
-    privateModeSetting.descEl.createEl('div', {
-      text: isValidLicense
-        ? '✅ Private mode is available with your license key.'
-        : '⚠️ This feature requires a valid license. Please purchase a license to enable private mode.',
-      cls: 'setting-item-description',
-    })
-
-    const licenceOptions = new Setting(containerEl)
-      .setName('License key')
-      .setDesc('Get access to premium features including private mode!')
-
-    licenceOptions.descEl.createEl('div', {
-      text: '(Please restart Obsidian after changing the key!!)',
-      cls: 'setting-item-description',
-    })
-
-    licenceOptions.addText((text) =>
-      text
-        .setPlaceholder('Your license key here...')
-        .setValue(this.plugin.settings.key || '')
-        .onChange(async (value) => {
-          this.plugin.settings.key = value
-          await this.plugin.saveSettings()
-
-          const parsedKey = parseLicenseKey(value)
-          if (parsedKey) {
-            this.plugin.settings.userId = parsedKey.userId
-            this.plugin.updatePluginList()
-            // Refresh the settings display to update private mode toggle
-            this.display()
-          }
-        })
-    )
-
-    if (!this.plugin.settings.key) {
-      licenceOptions.addButton((button) => {
-        button
-          .setButtonText('Request License')
-          .setCta()
-          .onClick(() => {
-            window.open(
-              'mailto:sifalda.jiri@gmail.com?subject=YourPulse%20License%20Request',
-              '_blank'
-            )
-          })
-      })
-    }
+      )
 
     new Setting(containerEl)
-      .setName('Hide Status Bar Stats')
-      .setDesc(
-        'Hide the status bar stats for this plugin. Useful if you want to keep your workspace clean and distraction-free.'
+      .setName('API Key')
+      .setDesc('Your API key from the Writing Tracker web app.')
+      .addText((text) =>
+        text
+          .setPlaceholder('wt_...')
+          .setValue(this.plugin.settings.apiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.apiKey = value.trim()
+            await this.plugin.saveSettings()
+          })
       )
-      .addToggle((toggle) => {
+
+    containerEl.createEl('h3', { text: 'Projects', cls: 'setting-item-heading' })
+    containerEl.createEl('p', {
+      text: 'Map a vault folder to a project name. All files inside that folder are tracked under that project.',
+      cls: 'setting-item-description',
+    })
+
+    const renderProjects = () => {
+      projectsContainer.empty()
+
+      this.plugin.settings.projects.forEach((project, index) => {
+        const row = new Setting(projectsContainer)
+          .addText((text) =>
+            text
+              .setPlaceholder('Folder path (e.g. IFH/IFH 1/Isekai For Hire B1)')
+              .setValue(project.folder)
+              .onChange(async (value) => {
+                this.plugin.settings.projects[index].folder = value.trim().replace(/\\/g, '/')
+                await this.plugin.saveSettings()
+              })
+          )
+          .addText((text) =>
+            text
+              .setPlaceholder('Project name (e.g. IFH B1)')
+              .setValue(project.name)
+              .onChange(async (value) => {
+                this.plugin.settings.projects[index].name = value.trim()
+                await this.plugin.saveSettings()
+              })
+          )
+          .addButton((btn) =>
+            btn
+              .setButtonText('Remove')
+              .setWarning()
+              .onClick(async () => {
+                this.plugin.settings.projects.splice(index, 1)
+                await this.plugin.saveSettings()
+                renderProjects()
+              })
+          )
+
+        // Style the two text inputs to share the row evenly
+        row.controlEl.querySelectorAll('input[type="text"]').forEach((el) => {
+          ;(el as HTMLInputElement).style.width = '220px'
+        })
+      })
+
+      new Setting(projectsContainer).addButton((btn) =>
+        btn
+          .setButtonText('+ Add project')
+          .setCta()
+          .onClick(async () => {
+            this.plugin.settings.projects.push({ folder: '', name: '' })
+            await this.plugin.saveSettings()
+            renderProjects()
+          })
+      )
+    }
+
+    const projectsContainer = containerEl.createDiv()
+    renderProjects()
+
+    containerEl.createEl('h3', { text: 'Sprint Defaults', cls: 'setting-item-heading' })
+
+    new Setting(containerEl)
+      .setName('Default sprint duration (minutes)')
+      .setDesc('The default duration in minutes for a writing sprint.')
+      .addText((text) =>
+        text
+          .setPlaceholder('25')
+          .setValue(String(this.plugin.settings.defaultSprintMinutes))
+          .onChange(async (value) => {
+            const parsed = parseInt(value)
+            if (!isNaN(parsed) && parsed > 0) {
+              this.plugin.settings.defaultSprintMinutes = parsed
+              await this.plugin.saveSettings()
+            }
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Default sprint word goal')
+      .setDesc('The default word count goal for a writing sprint.')
+      .addText((text) =>
+        text
+          .setPlaceholder('500')
+          .setValue(String(this.plugin.settings.defaultSprintWords))
+          .onChange(async (value) => {
+            const parsed = parseInt(value)
+            if (!isNaN(parsed) && parsed >= 0) {
+              this.plugin.settings.defaultSprintWords = parsed
+              await this.plugin.saveSettings()
+            }
+          })
+      )
+
+    containerEl.createEl('h3', { text: 'Locations', cls: 'setting-item-heading' })
+    containerEl.createEl('p', {
+      text: 'Named locations (e.g. Home, Cafe, Library) to tag your writing sprints with.',
+      cls: 'setting-item-description',
+    })
+
+    const renderLocations = () => {
+      locationsContainer.empty()
+
+      this.plugin.settings.locations.forEach((location, index) => {
+        new Setting(locationsContainer)
+          .addText((text) =>
+            text
+              .setPlaceholder('Location name (e.g. Home)')
+              .setValue(location)
+              .onChange(async (value) => {
+                this.plugin.settings.locations[index] = value.trim()
+                await this.plugin.saveSettings()
+              })
+          )
+          .addButton((btn) =>
+            btn
+              .setButtonText('Remove')
+              .setWarning()
+              .onClick(async () => {
+                this.plugin.settings.locations.splice(index, 1)
+                await this.plugin.saveSettings()
+                renderLocations()
+              })
+          )
+      })
+
+      new Setting(locationsContainer).addButton((btn) =>
+        btn
+          .setButtonText('+ Add location')
+          .setCta()
+          .onClick(async () => {
+            this.plugin.settings.locations.push('')
+            await this.plugin.saveSettings()
+            renderLocations()
+          })
+      )
+    }
+
+    const locationsContainer = containerEl.createDiv()
+    renderLocations()
+
+    new Setting(containerEl)
+      .setName('Ignored Paths')
+      .setDesc(
+        'Files to exclude from tracking. One entry per line. A bare name like "notes" ignores any folder named "notes" anywhere in your vault. A path with slashes like "Project/notes" only ignores that specific location.'
+      )
+      .addTextArea((area) =>
+        area
+          .setPlaceholder('Templates\nDaily Notes/private')
+          .setValue(this.plugin.settings.ignoredPaths.join('\n'))
+          .onChange(async (value) => {
+            this.plugin.settings.ignoredPaths = value
+              .split('\n')
+              .map((line) => line.trim())
+              .filter(Boolean)
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Hide Status Bar')
+      .setDesc("Hide today's word count from the status bar.")
+      .addToggle((toggle) =>
         toggle.setValue(!this.plugin.settings.statusBarStats).onChange(async (value) => {
           this.plugin.settings.statusBarStats = !value
           this.plugin.updateStatusBarIfNeeded()
           await this.plugin.saveSettings()
         })
-      })
-
-    if (!this.plugin.settings.privateMode) {
-      const filesOptions = new Setting(containerEl)
-        .setName('Files to be published')
-        .setDesc('List of files to be shared publicly via YourPulse.com profile (one per line).')
-      filesOptions.descEl.createEl('div', {
-        text: 'You can also mark a note for publishing by adding `yp-publish: true` to its file properties (frontmatter)',
-        cls: 'setting-item-description',
-      })
-      filesOptions.addTextArea((textArea) =>
-        textArea
-          .setPlaceholder('public-path.md\n/public-dir\n!/public-dir/not-public-path.md')
-          .setValue(this.plugin.settings.publicPaths.join('\n'))
-          .onChange(async (value) => {
-            this.plugin.settings.publicPaths = value.split('\n')
-            await this.plugin.saveData(this.plugin.settings)
-          })
       )
-
-      new Setting(containerEl)
-        .setName('Linked Notes Resolution')
-        .setDesc('Enable resolution of linked notes (![[note]]) before file upload')
-        .addToggle((toggle) => {
-          toggle
-            .setValue(this.plugin.settings.linkedNotesEnabled ?? true)
-            .onChange(async (value) => {
-              this.plugin.settings.linkedNotesEnabled = value
-              await this.plugin.saveSettings()
-            })
-        })
-
-      if (this.plugin.settings.linkedNotesEnabled !== false) {
-        new Setting(containerEl)
-          .setName('Max Resolution Depth')
-          .setDesc(
-            `Maximum depth for resolving nested linked notes (default: ${DEFAULT_SETTINGS.linkedNotesMaxDepth})`
-          )
-          .addSlider((slider) => {
-            slider
-              .setLimits(1, 10, 1)
-              .setValue(
-                this.plugin.settings.linkedNotesMaxDepth ?? DEFAULT_SETTINGS.linkedNotesMaxDepth
-              )
-              .setDynamicTooltip()
-              .onChange(async (value) => {
-                this.plugin.settings.linkedNotesMaxDepth = value
-                await this.plugin.saveSettings()
-              })
-          })
-      }
-    }
 
     new Setting(containerEl).setName('Version').setDesc(this.plugin.manifest.version)
-    new Setting(containerEl).setName('User ID').setDesc(this.plugin.settings.userId)
-
-    new Setting(containerEl)
-      .setName('Contact Me')
-      .setDesc(
-        'If you have any questions regarding this plugin, please contact me directly on x.com, or open an issue on GitHub'
-      )
-      .addButton((button) => {
-        button
-          .setButtonText('Contact Me on X')
-          .setCta()
-          .onClick(() => {
-            window.open('https://jsifalda.link/ZfxF9yv', '_blank')
-          })
-      })
-      .addButton((button) => {
-        button
-          .setButtonText('Open Github')
-          .setCta()
-          .onClick(() => {
-            window.open('https://jsifalda.link/VGTiZNX', '_blank')
-          })
-      })
   }
 }
 
-const DEFAULT_SETTINGS: YourPulseSettings = {
-  devices: {},
-  userId: uuidv4(),
-  publicPaths: [],
-  timezone: getTimezone(),
-  privateMode: false,
-  statusBarStats: true,
-  linkedNotesEnabled: true,
-  linkedNotesMaxDepth: 1,
-}
-
-interface ParsedLicenseKey {
-  key: string
-  userId: string
-}
-
-const parseLicenseKey = (key: string) => {
-  const parsedKey = Encryption().decrypt(key)
-
-  try {
-    const value = JSON.parse(parsedKey) as ParsedLicenseKey
-    // console.log({ value })
-    return value
-  } catch (e) {
-    console.error('--error decrypting key', e)
-  }
-}
-
-export default class YourPulse extends Plugin {
-  settings: YourPulseSettings
+export default class WritingTrackerPlugin extends Plugin {
+  settings: WritingTrackerSettings
   statusBarEl: HTMLElement
-  leaderboardPosition = ''
-  currentWordCount: number
+  currentWordCount: number = 0
   today: string
+
   debouncedUpdate?: Debouncer<[contents: string, filepath: string], void>
 
-  debouncedUpdateDb?: Debouncer<[key: string, value: string], Promise<any>>
-
   private hasCountChanged: boolean = false
-
-  private previousPlugins: Set<string> = new Set()
-
   private deviceName: string
 
-  private apiInterceptor: ApiInterceptor
-
   private getDeviceName(): string {
-    if (this.deviceName) {
-      return this.deviceName
-    }
+    if (this.deviceName) return this.deviceName
 
     try {
       // @ts-ignore
@@ -268,32 +272,24 @@ export default class YourPulse extends Plugin {
       this.deviceName = syncPlugin.deviceName
         ? syncPlugin.deviceName
         : syncPlugin.getDefaultDeviceName()
-    } catch (e) {
-      console.error('--error getting device name', e)
+    } catch {
+      // Obsidian Sync not available
     }
 
     if (!this.deviceName) {
       this.deviceName = this.app.vault.adapter.getName() || uuidv4()
     }
 
-    console.log('[yourpulse] device name:', this.deviceName)
-
     return this.deviceName
   }
 
   private ensureDeviceExists(): void {
-    if (!this.settings.devices) {
-      this.settings.devices = {}
+    if (!this.settings.devices) this.settings.devices = {}
+    const name = this.getDeviceName()
+    if (!this.settings.devices[name]) {
+      this.settings.devices[name] = { dayCounts: {}, todaysWordCount: {} }
     }
-
-    const deviceName = this.getDeviceName()
-    if (!this.settings.devices[deviceName]) {
-      this.settings.devices[deviceName] = {
-        dayCounts: {},
-        todaysWordCount: {},
-      }
-    }
-    this.deviceName = deviceName
+    this.deviceName = name
   }
 
   private getLocalData(): DeviceData {
@@ -301,74 +297,106 @@ export default class YourPulse extends Plugin {
     return this.settings.devices[this.deviceName]
   }
 
-  private getFlattenedDayCountsForDb(): Record<string, number> {
-    // Combine counts from all devices
-    const combined: Record<string, number> = {}
+  // Determines the project name for a file path.
+  // Returns null if the file should be ignored.
+  private getProjectForFile(filepath: string): string | null {
+    const normalizedPath = filepath.replace(/\\/g, '/')
 
-    // For each device
-    Object.values(this.settings.devices).forEach((deviceData) => {
-      // For each day in this device
-      Object.entries(deviceData.dayCounts).forEach(([day, count]) => {
-        // Add count to the total for this day
-        combined[day] = (combined[day] || 0) + count
-      })
-    })
+    for (const ignored of this.settings.ignoredPaths) {
+      const normalizedIgnored = ignored.replace(/\\/g, '/')
+      if (normalizedIgnored.includes('/')) {
+        // Contains a slash — prefix match from vault root
+        if (
+          normalizedPath === normalizedIgnored ||
+          normalizedPath.startsWith(normalizedIgnored + '/')
+        ) {
+          return null
+        }
+      } else {
+        // No slash — match this name as a path segment anywhere in the path
+        if (
+          normalizedPath === normalizedIgnored ||
+          normalizedPath.startsWith(normalizedIgnored + '/') ||
+          normalizedPath.includes('/' + normalizedIgnored + '/') ||
+          normalizedPath.endsWith('/' + normalizedIgnored)
+        ) {
+          return null
+        }
+      }
+    }
 
-    return combined
+    // Sort longest folder path first so more specific matches win
+    const sorted = [...this.settings.projects].sort((a, b) => b.folder.length - a.folder.length)
+    for (const project of sorted) {
+      if (normalizedPath.startsWith(project.folder + '/') || normalizedPath === project.folder) {
+        return project.name
+      }
+    }
+
+    return 'default'
+  }
+
+  private getProjectWordCounts(): Record<string, number> {
+    const counts: Record<string, number> = {}
+
+    // Sum across all devices that have been active today.
+    // Obsidian Sync shares the settings file, so other devices' data is available here.
+    for (const deviceData of Object.values(this.settings.devices)) {
+      // Skip devices that haven't tracked anything today
+      if (!Object.prototype.hasOwnProperty.call(deviceData.dayCounts, this.today)) continue
+
+      for (const [filepath, wc] of Object.entries(deviceData.todaysWordCount)) {
+        const project = this.getProjectForFile(filepath)
+        if (project === null) continue
+        const words = Math.max(0, wc.current - wc.initial)
+        if (words > 0) counts[project] = (counts[project] ?? 0) + words
+      }
+    }
+
+    return counts
   }
 
   async onload() {
-    console.log('[yourpulse] Plugin Loaded', this.manifest.version)
-
-    addIcon(ObsiPulseIcon.name, ObsiPulseIcon.html)
+    console.log('[writing-tracker] loaded', this.manifest.version)
 
     await this.loadSettings()
 
-    // Initialize API interceptor for private mode
-    this.apiInterceptor = new ApiInterceptor({ plugin: this })
-
-    this.addRibbonIcon(ObsiPulseIcon.name, 'Open YourPulse Profile', () => {
-      this.openYourPulseProfile('obsidian-plugin-ribbon')
-    })
-
-    if (this.settings.key) {
-      try {
-        const parsedKey = parseLicenseKey(this.settings.key)
-        this.settings.userId = parsedKey.userId
-      } catch (e) {
-        console.error('--error parsing key', e, this.settings.key)
-        new Notice('Invalid license key for YourPulse plugin')
-      }
-    }
-    // else {
-    //   new Notice('Missing license key for YourPulse plugin')
-    // }
-
-    this.updatePluginList()
-    this.initStatusBar()
-    this.updateDate()
-
-    // @ts-ignore
-    this.previousPlugins = new Set(this.app.plugins.enabledPlugins)
-
     this.debouncedUpdate = debounce(
-      (contents: string, filepath: string) => {
-        this.updateWordCount(contents, filepath)
-      },
-      // 400,
+      (contents: string, filepath: string) => this.updateWordCount(contents, filepath),
       1000,
       false
     )
+
     this.ensureDeviceExists()
     const deviceData = this.getLocalData()
+    this.updateDate()
+
     if (deviceData.dayCounts.hasOwnProperty(this.today)) {
       this.updateCounts()
     } else {
       this.currentWordCount = 0
     }
 
+    this.initStatusBar()
+
+    // Register sprint view
+    this.registerView(SPRINT_VIEW_TYPE, (leaf) => new SprintView(leaf, this))
+
+    // File menu: Start Writing Sprint
+    this.registerEvent(
+      this.app.workspace.on('file-menu', (menu, file) => {
+        menu.addItem((item) =>
+          item
+            .setTitle('Start Writing Sprint')
+            .setIcon('timer')
+            .onClick(() => this.startSprint(file as TFile))
+        )
+      })
+    )
+
     this.registerEvent(this.app.workspace.on('quick-preview', this.onQuickPreview.bind(this)))
 
+    // Save and update date periodically
     this.registerInterval(
       window.setInterval(() => {
         this.updateDate()
@@ -376,276 +404,143 @@ export default class YourPulse extends Plugin {
       }, 5000)
     )
 
-    this.registerInterval(
-      window.setInterval(() => {
-        this.checkForPluginChanges()
-      }, 60000)
-    )
-
-    if (this.app.workspace.layoutReady) {
-      this.initLeaf()
-    } else {
-      // @ts-ignore
-      this.registerEvent(this.app.workspace.on('layout-ready', this.initLeaf.bind(this)))
-    }
-
-    this.addCommand({
-      id: 'obsipulse-open-profile',
-      name: this.settings.privateMode ? 'Open private mode view' : 'Open public profile',
-      callback: () => {
-        this.openYourPulseProfile('obsidian-plugin-command')
-      },
-    })
-
-    this.addSettingTab(new YourPulseSettingTab(this.app, this))
-
+    // Sync to server on file-open (after writing in a file)
     this.registerEvent(
-      this.app.workspace.on('file-open', (file: TFile) => {
+      this.app.workspace.on('file-open', (_file: TFile) => {
         if (this.hasCountChanged) {
           this.hasCountChanged = false
-          if (this.settings.userId) {
-            this.updateDb(
-              `user/${this.settings.userId}/vault/${this.app.vault.adapter.getName()}/daily-counts`,
-              JSON.stringify(this.getFlattenedDayCountsForDb())
-            )
-          }
+          this.syncToServer()
         }
       })
     )
 
-    // this.registerEvent(
-    //   this.app.vault.on('modify', () => {
-    //     if (this.hasCountChanged) {
-    //       this.hasCountChanged = false
-    //       if (this.settings.userId) {
-    //         this.updateDb(
-    //           `user/${this.settings.userId}/vault/${this.app.vault.adapter.getName()}/daily-counts`,
-    //           JSON.stringify(this.settings.dayCounts),
-    //         )
-    //       } else {
-    //         console.log('--no db update', this.settings.userId, this.debouncedUpdateDb)
-    //       }
-    //     }
-    //   }),
-    // )
-
+    // When a file is moved/renamed, update its key in todaysWordCount so
+    // project and ignore rules are re-evaluated against the new path.
     this.registerEvent(
-      this.app.vault.on('modify', async (file: TFile) => {
-        if (this.settings.privateMode) {
-          console.log('[yourpulse] private mode, skipping file upload', file.path)
-          return
-        }
-
-        if (
-          this.settings.publicPaths.includes(file.path) ||
-          (await hasYpPublishFileProperty(file, this.app))
-        ) {
-          const dataviewCompiler = new DataviewCompiler()
-          const fileContent = await this.app.vault.read(file)
-
-          const processedContent =
-            this.settings.linkedNotesEnabled !== false
-              ? await (async () => {
-                  const linkedNotesCompiler = new LinkedNotesCompiler(
-                    this.app,
-                    this.settings.linkedNotesMaxDepth ?? 1
-                  )
-
-                  console.time('linked-notes-compile')
-                  const c = await linkedNotesCompiler.compile(file)(fileContent)
-                  console.timeEnd('linked-notes-compile')
-                  return c
-                })()
-              : fileContent
-
-          console.time('dataview-compile')
-          const compiledFile = await dataviewCompiler.compile(file)(processedContent)
-          console.timeEnd('dataview-compile')
-
-          const hash = encodeURIComponent(file.path)
-          const toSync = { stat: file.stat, content: compiledFile, path: file.path }
-
-          try {
-            await this.updateFilesDb(
-              `user/${this.settings.userId}/vault/${this.app.vault.adapter.getName()}/files/${hash}`,
-              JSON.stringify(toSync)
-            )
-
-            await addYpPublishUrlToFile(
-              file,
-              this.app,
-              `https://www.yourpulse.cc/app/profile/${this.settings.userId}/file/${hash}`
-            )
-          } catch (error) {
-            console.error('[yourpulse] error uploading file:', error, toSync)
-          }
+      this.app.vault.on('rename', (file: TFile, oldPath: string) => {
+        this.ensureDeviceExists()
+        const deviceData = this.getLocalData()
+        if (oldPath in deviceData.todaysWordCount) {
+          deviceData.todaysWordCount[file.path] = deviceData.todaysWordCount[oldPath]
+          delete deviceData.todaysWordCount[oldPath]
+          this.updateCounts()
         }
       })
     )
+
+    // Also sync periodically so you don't have to switch files
+    this.registerInterval(
+      window.setInterval(() => {
+        if (this.hasCountChanged) {
+          this.hasCountChanged = false
+          this.syncToServer()
+        }
+      }, 30 * 1000)
+    )
+
+    this.addSettingTab(new WritingTrackerSettingTab(this.app, this))
+  }
+
+  async startSprint(file: TFile) {
+    const { workspace } = this.app
+    let leaf = workspace.getRightLeaf(false)
+    if (!leaf) {
+      leaf = workspace.getLeaf('split', 'vertical')
+    }
+    await leaf.setViewState({ type: SPRINT_VIEW_TYPE, active: true })
+    workspace.revealLeaf(leaf)
+
+    const view = leaf.view as SprintView
+    await view.initSprint(file)
+  }
+
+  async syncSprint(record: SprintRecord) {
+    const { serverUrl, apiKey } = this.settings
+    if (!serverUrl || !apiKey) return
+
+    try {
+      await requestUrl({
+        method: 'POST',
+        url: `${serverUrl}/api/sprints`,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(record),
+      })
+    } catch (err) {
+      console.error('[writing-tracker] sprint sync failed', err)
+    }
   }
 
   onunload(): void {
-    console.log('[yourpulse] Plugin Unloaded')
+    console.log('[writing-tracker] unloaded')
   }
 
   updateStatusBarIfNeeded() {
-    console.log('[yourpulse] updating statusbar', this.settings.statusBarStats)
-
     if (this.settings.statusBarStats) {
-      if (!this.statusBarEl) {
-        this.addStatusBar()
-      }
+      if (!this.statusBarEl) this.addStatusBar()
     } else {
       if (this.statusBarEl) {
         this.statusBarEl.remove()
-        this.statusBarEl = undefined
-        // console.log('[yourpulse] status bar stats removed')
+        this.statusBarEl = undefined as unknown as HTMLElement
       }
     }
   }
 
   addStatusBar() {
     this.statusBarEl = this.addStatusBarItem()
-    this.statusBarEl.setAttribute('style', 'cursor: pointer')
-
-    // Add private mode visual indicator
-    if (this.settings.privateMode) {
-      this.statusBarEl.classList.add('private-mode-active')
-    }
-
-    this.statusBarEl.onclick = () => {
-      this.openYourPulseProfile('obsidian-plugin-statusbar')
-    }
-
     this.updateStatusBarText()
-    console.log('[yourpulse] status bar stats initialized')
   }
 
   updateStatusBarText() {
     if (this.statusBarEl) {
-      if (this.leaderboardPosition) {
-        this.statusBarEl.setText(
-          `YourPulse Rank: #${this.leaderboardPosition} (${this.currentWordCount || 0} words today)`
-        )
-        this.statusBarEl.setAttribute(
-          'title',
-          `You rank #${this.leaderboardPosition} users today. (Click to open YourPulse profile)`
-        )
-      } else {
-        this.statusBarEl.setText(`YourPulse: ${this.currentWordCount || 0} words today`)
-        this.statusBarEl.setAttribute('title', '')
-      }
+      this.statusBarEl.setText(`${this.currentWordCount ?? 0} words today`)
     }
   }
 
   initStatusBar() {
-    this.registerInterval(
-      window.setInterval(() => {
-        this.updateStatusBarText()
-      }, 4000)
-    )
-
-    const initLeaderboard = () => {
-      getLeaderBoardUser(this.settings.userId, this)
-        .then(({ totalCount, user }) => {
-          if (user) {
-            this.leaderboardPosition = `${user.ranking} out of ${totalCount}`
-          }
-        })
-        .catch(console.error)
-    }
-
-    initLeaderboard()
-
-    this.registerInterval(
-      window.setInterval(
-        () => {
-          initLeaderboard()
-        },
-        60 * 1000 * 30
-      ) // 30 minutes
-    )
-
-    if (this.settings.statusBarStats) {
-      this.addStatusBar()
-    }
-  }
-
-  openYourPulseProfile(ref: string) {
-    if (this.settings.privateMode) {
-      // Show modal instead of external redirect when private mode is active
-      this.showPrivateModeModal()
-    } else {
-      // Normal behavior when private mode is disabled
-      window.open(createProfileUrl(this.settings.userId, ref), '_blank')
-    }
-  }
-
-  showPrivateModeModal() {
-    // TODO: it should not be only this device?!
-    const modal = new PrivateModeModal(this.app, this.settings.devices[this.deviceName])
-    modal.open()
-  }
-
-  updatePluginList() {
-    if (this.settings.userId) {
-      const plugins = listAllPlugins(this.app)
-      this.updateDb(
-        `user/${this.settings.userId}/vault/${this.app.vault.adapter.getName()}/plugins`,
-        JSON.stringify(plugins)
-      )
-    }
-  }
-
-  initLeaf(): void {
-    if (this.app.workspace.getLeavesOfType(VIEW_TYPE_STATS_TRACKER).length) {
-      return
-    }
+    this.registerInterval(window.setInterval(() => this.updateStatusBarText(), 4000))
+    if (this.settings.statusBarStats) this.addStatusBar()
   }
 
   onQuickPreview(file: TFile, contents: string) {
     if (this.app.workspace.getActiveViewOfType(MarkdownView)) {
-      this.debouncedUpdate(contents, file.path)
+      this.debouncedUpdate?.(contents, file.path)
     }
   }
 
-  //Inspired by https://github.com/lukeleppan/better-word-count
-  getWordCount(text: string) {
-    let words: number = 0
-
+  getWordCount(text: string): number {
+    let words = 0
     const matches = text.match(
       /[a-zA-Z0-9_\u0392-\u03c9\u00c0-\u00ff\u0600-\u06ff]+|[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u309f\uac00-\ud7af]+/gm
     )
-
     if (matches) {
-      for (let i = 0; i < matches.length; i++) {
-        if (matches[i].charCodeAt(0) > 19968) {
-          words += matches[i].length
-        } else {
-          words += 1
-        }
+      for (const match of matches) {
+        words += match.charCodeAt(0) > 19968 ? match.length : 1
       }
     }
     return words
   }
+
   updateWordCount(contents: string, filepath: string) {
+    if (this.getProjectForFile(filepath) === null) return
+
     this.ensureDeviceExists()
     const deviceData = this.getLocalData()
     const curr = this.getWordCount(contents)
 
     if (deviceData.dayCounts.hasOwnProperty(this.today)) {
       if (deviceData.todaysWordCount.hasOwnProperty(filepath)) {
-        //updating existing file
         deviceData.todaysWordCount[filepath].current = curr
       } else {
-        //created new file during session
         deviceData.todaysWordCount[filepath] = { initial: curr, current: curr }
       }
     } else {
-      //new day, flush the cache
       deviceData.todaysWordCount = {}
       deviceData.todaysWordCount[filepath] = { initial: curr, current: curr }
     }
+
     this.updateCounts()
   }
 
@@ -653,8 +548,6 @@ export default class YourPulse extends Plugin {
     this.today = getLocalTodayDate()
     this.ensureDeviceExists()
     const deviceData = this.getLocalData()
-
-    //reset count if new day happen
     if (deviceData.dayCounts[this.today] === undefined) {
       deviceData.dayCounts[this.today] = 0
       deviceData.todaysWordCount = {}
@@ -665,136 +558,96 @@ export default class YourPulse extends Plugin {
     this.ensureDeviceExists()
     const deviceData = this.getLocalData()
 
-    this.currentWordCount = Object.values(deviceData.todaysWordCount)
-      .map((wordCount) => Math.max(0, wordCount.current - wordCount.initial))
+    // Store this device's contribution in its own dayCounts
+    const thisDeviceCount = Object.values(deviceData.todaysWordCount)
+      .map((wc) => Math.max(0, wc.current - wc.initial))
       .reduce((a, b) => a + b, 0)
-    deviceData.dayCounts[this.today] = this.currentWordCount
+    deviceData.dayCounts[this.today] = thisDeviceCount
+
+    // Status bar shows combined total across all devices active today
+    this.currentWordCount = Object.values(this.settings.devices)
+      .filter((d) => Object.prototype.hasOwnProperty.call(d.dayCounts, this.today))
+      .flatMap((d) => Object.values(d.todaysWordCount))
+      .map((wc) => Math.max(0, wc.current - wc.initial))
+      .reduce((a, b) => a + b, 0)
 
     this.hasCountChanged = true
   }
-  checkForPluginChanges() {
-    // @ts-ignore
-    const currentPlugins = new Set<string>(this.app?.plugins?.enabledPlugins || [])
-    let pluginListHasChanged = false
-    // Check for newly enabled plugins
-    for (const plugin of currentPlugins) {
-      if (!this.previousPlugins.has(plugin)) {
-        pluginListHasChanged = true
-        break
-      }
-    }
 
-    // Check for disabled plugins
-    for (const plugin of this.previousPlugins) {
-      if (!currentPlugins.has(plugin)) {
-        pluginListHasChanged = true
-        break
-      }
-    }
+  async syncToServer() {
+    const { serverUrl, apiKey } = this.settings
+    if (!serverUrl || !apiKey) return
 
-    if (pluginListHasChanged) {
-      this.updatePluginList()
-    }
+    const deviceData = this.getLocalData()
+    console.log('[writing-tracker] todaysWordCount paths:', Object.keys(deviceData.todaysWordCount))
+    console.log('[writing-tracker] configured projects:', JSON.stringify(this.settings.projects))
 
-    // Update the previousPlugins set
-    this.previousPlugins = currentPlugins
-  }
+    const projects = this.getProjectWordCounts()
+    console.log('[writing-tracker] computed project counts:', JSON.stringify(projects))
 
-  async updateDb(key: string, value: any) {
-    return this.apiInterceptor.executeIfAllowed(async () => {
-      const body = JSON.stringify({ key, value })
+    if (Object.keys(projects).length === 0) return
 
-      return requestUrl({
+    try {
+      await requestUrl({
         method: 'POST',
-        url: `https://www.mypi.one/webhook/424317ea-705c-41e4-b97b-441337d46f59`,
+        url: `${serverUrl}/api/sync`,
         headers: {
-          'content-type': 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
         },
-        body,
-      }).catch(console.error)
-    })
+        body: JSON.stringify({ date: this.today, projects }),
+      })
+    } catch (err) {
+      console.error('[writing-tracker] sync failed', err)
+    }
   }
-  async updateFilesDb(key: string, value: any) {
-    return this.apiInterceptor.executeIfAllowed(async () => {
-      const body = JSON.stringify({ key, value })
 
-      return requestUrl({
-        method: 'POST',
-        url: `https://www.mypi.one/webhook/9e631d01-6a29-4752-99c3-9fea9244b163`,
-        headers: {
-          'content-type': 'application/json',
-        },
-        body,
-      }).catch(console.error)
-    })
-  }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
-    this.settings.timezone = getTimezone() // always override timezone with current
+    this.settings.timezone = getTimezone()
 
-    // Migrate old data format to new nested structure if needed
+    // Normalize any backslashes in stored project folder paths
+    if (this.settings.projects) {
+      this.settings.projects = this.settings.projects.map((p) => ({
+        ...p,
+        folder: p.folder.replace(/\\/g, '/'),
+      }))
+    }
+
     this.ensureDeviceExists()
 
-    // If we have old data format, migrate it to the device-based structure
-    if ('dayCounts' in this.settings || 'todaysWordCount' in this.settings) {
-      const deviceName = this.getDeviceName()
-
-      // @ts-ignore - Handling old format migration
-      if (this.settings.dayCounts) {
-        if (!this.settings.devices[deviceName]) {
-          this.settings.devices[deviceName] = {
-            dayCounts: {},
-            todaysWordCount: {},
-          }
-        }
-        // @ts-ignore - Handling old format migration
-        this.settings.devices[deviceName].dayCounts = this.settings.dayCounts
+    // Migrate old dayCounts/todaysWordCount top-level fields if present
+    const raw = this.settings as any
+    if (raw.dayCounts || raw.todaysWordCount) {
+      const name = this.getDeviceName()
+      if (!this.settings.devices[name]) {
+        this.settings.devices[name] = { dayCounts: {}, todaysWordCount: {} }
       }
-
-      // @ts-ignore - Handling old format migration
-      if (this.settings.todaysWordCount) {
-        if (!this.settings.devices[deviceName]) {
-          this.settings.devices[deviceName] = {
-            dayCounts: {},
-            todaysWordCount: {},
-          }
-        }
-        // @ts-ignore - Handling old format migration
-        this.settings.devices[deviceName].todaysWordCount = this.settings.todaysWordCount
-      }
+      if (raw.dayCounts) this.settings.devices[name].dayCounts = raw.dayCounts
+      if (raw.todaysWordCount) this.settings.devices[name].todaysWordCount = raw.todaysWordCount
     }
   }
 
   async saveSettings() {
-    if (Object.keys(this.settings).length > 0) {
-      // console.time('[yourpulse] saveSettings')
+    if (Object.keys(this.settings).length === 0) return
 
-      if (this.settings.devices && Object.keys(this.settings.devices).length > 0) {
-        try {
-          // check for another device in data, and merge it with current one
-          const tempt = await this.loadData()
-          if (tempt && tempt.devices) {
-            delete tempt.devices[this.deviceName]
-
-            if (Object.keys(tempt.devices).length > 0) {
-              const devices = Object.keys(tempt.devices)
-              devices.forEach((device) => {
-                this.settings.devices[device] = {
-                  ...(tempt.devices[device] || {}),
-                  ...(this.settings.devices[device] || {}),
-                }
-              })
-
-              // console.log('--merged devices', this.settings.devices)
+    if (this.settings.devices && Object.keys(this.settings.devices).length > 0) {
+      try {
+        const stored = await this.loadData()
+        if (stored?.devices) {
+          delete stored.devices[this.deviceName]
+          for (const [device, data] of Object.entries(stored.devices)) {
+            this.settings.devices[device] = {
+              ...(data as DeviceData),
+              ...(this.settings.devices[device] ?? {}),
             }
           }
-        } catch (e) {
-          console.error('[yourpulse] error merging devices settings', e)
         }
+      } catch (err) {
+        console.error('[writing-tracker] error merging device settings', err)
       }
-
-      await this.saveData(this.settings)
-      // console.timeEnd('[yourpulse] saveSettings')
     }
+
+    await this.saveData(this.settings)
   }
 }
