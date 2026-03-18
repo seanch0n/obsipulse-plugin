@@ -458,6 +458,9 @@ export default class WritingTrackerPlugin extends Plugin {
     const { serverUrl, apiKey } = this.settings
     if (!serverUrl || !apiKey) return
 
+    // Flush any pending word counts immediately so sprint words hit daily totals
+    await this.syncToServer()
+
     try {
       await requestUrl({
         method: 'POST',

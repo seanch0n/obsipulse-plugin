@@ -299,8 +299,17 @@ export class SprintView extends ItemView {
     }
   }
 
-  private startSprint() {
+  private async startSprint() {
     if (this.startedAt === 0) {
+      // Re-read baseline at the moment the sprint actually begins so any
+      // edits made between initSprint and clicking Start are accounted for.
+      if (this.file) {
+        const content = await this.app.vault.cachedRead(this.file)
+        this.wordsAtStart = this.plugin.getWordCount(content)
+        this.wordsInSprint = 0
+        this.wordCountEl.setText('0')
+        this.updateBottomText()
+      }
       this.startedAt = Date.now()
     }
     this.isRunning = true
@@ -377,7 +386,17 @@ export class SprintView extends ItemView {
     return null
   }
 
-  private resetSprint() {
+  private async resetSprint() {
+    // If a sprint was in progress, save it before clearing
+    if (this.startedAt !== 0 && this.elapsedSeconds > 0) {
+      const completed = this.wordsInSprint >= this.goalWords
+      const record = this.buildRecord(completed)
+      await this.plugin.syncSprint(record)
+      new Notice(
+        `Sprint saved: ${this.wordsInSprint} words in ${Math.round(this.elapsedSeconds / 60)} min`
+      )
+    }
+
     this.isRunning = false
     this.stopTimer()
     this.elapsedSeconds = 0
@@ -386,6 +405,10 @@ export class SprintView extends ItemView {
     this.startBtn.setText('Start')
     this.wordCountEl.setText('0')
     this.updateBottomText()
+    if (this.file) {
+      const content = await this.app.vault.cachedRead(this.file)
+      this.wordsAtStart = this.plugin.getWordCount(content)
+    }
   }
 
   private openEditModal() {

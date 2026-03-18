@@ -36,6 +36,9 @@ export default function Navbar() {
           <Link to="/history" className={linkClass('/history')}>
             History
           </Link>
+          <Link to="/sprints" className={linkClass('/sprints')}>
+            Sprints
+          </Link>
           <Link to="/export" className={linkClass('/export')}>
             Export
           </Link>

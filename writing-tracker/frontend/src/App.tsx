@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard'
 import Settings from './pages/Settings'
 import History from './pages/History'
 import Export from './pages/Export'
+import Sprints from './pages/Sprints'
 import Navbar from './components/Navbar'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -87,6 +88,17 @@ export default function App() {
               <Navbar />
               <main className="max-w-5xl mx-auto px-4 py-8">
                 <Export />
+              </main>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/sprints"
+          element={
+            <PrivateRoute>
+              <Navbar />
+              <main className="max-w-5xl mx-auto px-4 py-8">
+                <Sprints />
               </main>
             </PrivateRoute>
           }
