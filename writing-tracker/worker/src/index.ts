@@ -61,9 +61,9 @@ app.route('/api/entry', entries)
 app.route('/api/activity', activity)
 app.route('/api/goals', goals)
 
-// Sprints — POST uses API key auth (handled inside route), GET uses session auth
+// Sprints — POST uses API key auth (handled inside route), GET/PUT/DELETE use session auth
 app.use('/api/sprints/*', async (c, next) => {
-  if (c.req.method === 'GET') {
+  if (c.req.method === 'GET' || c.req.method === 'PUT' || c.req.method === 'DELETE') {
     return sessionAuth(c, next)
   }
   return next()

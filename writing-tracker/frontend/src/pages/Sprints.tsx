@@ -11,7 +11,7 @@ import {
   Line,
   Scatter,
 } from 'recharts'
-import { getSprints, type SprintRecord } from '../lib/api'
+import { getSprints, updateSprint, deleteSprint, type SprintRecord } from '../lib/api'
 
 function wpm(s: SprintRecord): number {
   if (s.duration_seconds <= 0) return 0
@@ -85,6 +85,15 @@ export default function Sprints() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [yearFilter, setYearFilter] = useState<number | 'all'>('all')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState<{
+    words_written: number
+    goal_duration_minutes: number
+    location: string
+  } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [page, setPage] = useState(0)
+  const PAGE_SIZE = 20
 
   useEffect(() => {
     getSprints()
@@ -159,7 +168,10 @@ export default function Sprints() {
   })
 
   // Recent sprints (all, sorted desc)
-  const recent = [...filtered].sort((a, b) => b.started_at - a.started_at).slice(0, 20)
+  const today = new Date().toISOString().slice(0, 10)
+  const sortedFiltered = [...filtered].sort((a, b) => b.started_at - a.started_at)
+  const totalPages = Math.max(1, Math.ceil(sortedFiltered.length / PAGE_SIZE))
+  const recent = sortedFiltered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
 
   if (loading) {
     return <p className="text-sm text-gray-400 py-8 text-center">Loading…</p>
@@ -171,9 +183,10 @@ export default function Sprints() {
         <h1 className="text-xl font-bold text-gray-900">Sprint Analytics</h1>
         <select
           value={yearFilter}
-          onChange={(e) =>
+          onChange={(e) => {
             setYearFilter(e.target.value === 'all' ? 'all' : parseInt(e.target.value))
-          }
+            setPage(0)
+          }}
           className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
           <option value="all">All time</option>
@@ -392,18 +405,41 @@ export default function Sprints() {
 
           {/* Recent sprints table */}
           <div className="bg-white rounded-xl border border-gray-200 p-6">
-            <h2 className="text-sm font-semibold text-gray-700 mb-4">
-              Recent Sprints{filtered.length > 20 ? ` (showing 20 of ${filtered.length})` : ''}
-            </h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-gray-700">Sprints ({filtered.length})</h2>
+              {totalPages > 1 && (
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                    disabled={page === 0}
+                    className="p-1 rounded hover:bg-gray-200 text-gray-500 disabled:opacity-30 transition-colors"
+                  >
+                    ←
+                  </button>
+                  <span className="text-sm text-gray-500 tabular-nums">
+                    {page + 1} / {totalPages}
+                  </span>
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                    disabled={page >= totalPages - 1}
+                    className="p-1 rounded hover:bg-gray-200 text-gray-500 disabled:opacity-30 transition-colors"
+                  >
+                    →
+                  </button>
+                </div>
+              )}
+            </div>
+            {error && <p className="text-sm text-red-600 bg-red-50 rounded-lg p-3 mb-3">{error}</p>}
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-200">
                   <th className="text-left py-2 pr-4 font-medium text-gray-500">Date</th>
-                  <th className="text-left py-2 pr-4 font-medium text-gray-500">File</th>
+                  <th className="text-left py-2 pr-4 font-medium text-gray-500">Project</th>
                   <th className="text-left py-2 pr-4 font-medium text-gray-500">Location</th>
                   <th className="text-right py-2 pr-4 font-medium text-gray-500">Duration</th>
                   <th className="text-right py-2 pr-4 font-medium text-gray-500">Words</th>
-                  <th className="text-right py-2 font-medium text-gray-500">WPM</th>
+                  <th className="text-right py-2 pr-4 font-medium text-gray-500">WPM</th>
+                  <th className="py-2 w-24" />
                 </tr>
               </thead>
               <tbody>
@@ -412,23 +448,128 @@ export default function Sprints() {
                   const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
                   const mins = Math.round(s.duration_seconds / 60)
                   const w = wpm(s)
+                  const isEditing = editingId === s.id
+
+                  const isToday = dateStr === today
+
+                  if (isEditing && editDraft) {
+                    return (
+                      <tr key={s.id} className="border-b border-blue-100 bg-blue-50">
+                        <td className="py-2 pr-4 tabular-nums text-gray-700">{dateStr}</td>
+                        <td className="py-2 pr-4 text-gray-500">{s.project ?? s.file_name}</td>
+                        <td className="py-2 pr-4">
+                          <input
+                            type="text"
+                            value={editDraft.location}
+                            onChange={(e) =>
+                              setEditDraft((d) => d && { ...d, location: e.target.value })
+                            }
+                            placeholder="Location"
+                            className="border border-gray-300 rounded px-2 py-0.5 text-sm w-24 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </td>
+                        <td className="py-2 pr-4 text-right">
+                          <input
+                            type="number"
+                            min={1}
+                            value={editDraft.goal_duration_minutes}
+                            onChange={(e) =>
+                              setEditDraft(
+                                (d) =>
+                                  d && {
+                                    ...d,
+                                    goal_duration_minutes: parseInt(e.target.value) || 1,
+                                  }
+                              )
+                            }
+                            className="border border-gray-300 rounded px-2 py-0.5 text-sm w-14 text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                          <span className="text-gray-500 ml-1">m</span>
+                        </td>
+                        <td className="py-2 pr-4 text-right">
+                          <input
+                            type="number"
+                            min={0}
+                            value={editDraft.words_written}
+                            onChange={(e) =>
+                              setEditDraft(
+                                (d) => d && { ...d, words_written: parseInt(e.target.value) || 0 }
+                              )
+                            }
+                            className="border border-gray-300 rounded px-2 py-0.5 text-sm w-20 text-right focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </td>
+                        <td className="py-2 pr-4 text-right text-gray-400">—</td>
+                        <td className="py-2 text-right space-x-2">
+                          <button
+                            disabled={saving}
+                            onClick={async () => {
+                              if (!editDraft) return
+                              setSaving(true)
+                              try {
+                                await updateSprint(s.id, {
+                                  words_written: editDraft.words_written,
+                                  goal_duration_minutes: editDraft.goal_duration_minutes,
+                                  location: editDraft.location || null,
+                                })
+                                setSprints((prev) =>
+                                  prev.map((r) =>
+                                    r.id === s.id
+                                      ? {
+                                          ...r,
+                                          words_written: editDraft.words_written,
+                                          goal_duration_minutes: editDraft.goal_duration_minutes,
+                                          location: editDraft.location || null,
+                                        }
+                                      : r
+                                  )
+                                )
+                                setEditingId(null)
+                                setEditDraft(null)
+                              } catch (e) {
+                                setError(e instanceof Error ? e.message : 'Save failed')
+                              } finally {
+                                setSaving(false)
+                              }
+                            }}
+                            className="text-xs font-medium text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                          >
+                            {saving ? 'Saving…' : 'Save'}
+                          </button>
+                          <button
+                            onClick={() => {
+                              setEditingId(null)
+                              setEditDraft(null)
+                            }}
+                            className="text-xs text-gray-400 hover:text-gray-600"
+                          >
+                            Cancel
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  }
+
                   return (
-                    <tr key={s.id} className="border-b border-gray-100 hover:bg-gray-50">
+                    <tr
+                      key={s.id}
+                      className={`border-b border-gray-100 hover:bg-gray-50${isToday ? ' bg-blue-100' : ''}`}
+                    >
                       <td className="py-2 pr-4 tabular-nums text-gray-700">{dateStr}</td>
-                      <td className="py-2 pr-4 text-gray-700 max-w-[180px] truncate">
+                      <td className="py-2 pr-4 text-gray-700 max-w-[160px] truncate">
                         {s.project ?? s.file_name}
                       </td>
                       <td className="py-2 pr-4 text-gray-500">{s.location ?? '—'}</td>
                       <td className="py-2 pr-4 text-right tabular-nums text-gray-700">
                         {mins}m
                         {!s.completed && (
-                          <span className="ml-1 text-xs text-gray-400">(abandoned)</span>
+                          <span className="ml-1 text-xs text-gray-400">(partial)</span>
                         )}
                       </td>
                       <td className="py-2 pr-4 text-right tabular-nums text-gray-700">
                         {s.words_written.toLocaleString()}
                       </td>
-                      <td className="py-2 text-right tabular-nums font-medium">
+                      <td className="py-2 pr-4 text-right tabular-nums font-medium">
                         {s.words_written > 0 ? (
                           <span className={w >= overallAvgWpm ? 'text-green-600' : 'text-gray-700'}>
                             {w}
@@ -436,6 +577,35 @@ export default function Sprints() {
                         ) : (
                           <span className="text-gray-400">—</span>
                         )}
+                      </td>
+                      <td className="py-2 text-right space-x-3">
+                        <button
+                          onClick={() => {
+                            setEditingId(s.id)
+                            setEditDraft({
+                              words_written: s.words_written,
+                              goal_duration_minutes: s.goal_duration_minutes,
+                              location: s.location ?? '',
+                            })
+                          }}
+                          className="text-xs text-gray-400 hover:text-gray-700"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (!confirm('Delete this sprint?')) return
+                            try {
+                              await deleteSprint(s.id)
+                              setSprints((prev) => prev.filter((r) => r.id !== s.id))
+                            } catch (e) {
+                              setError(e instanceof Error ? e.message : 'Delete failed')
+                            }
+                          }}
+                          className="text-xs text-red-400 hover:text-red-600"
+                        >
+                          Delete
+                        </button>
                       </td>
                     </tr>
                   )

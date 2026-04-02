@@ -155,6 +155,8 @@ export default function History() {
     }
   }
 
+  const today = new Date().toISOString().slice(0, 10)
+
   const inputCls =
     'border border-gray-300 rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
 
@@ -258,6 +260,7 @@ export default function History() {
               {entries.map((entry) => {
                 const isEditing =
                   editing?.orig.date === entry.date && editing?.orig.project === entry.project
+                const isToday = entry.date === today
 
                 if (isEditing && editing) {
                   return (
@@ -333,7 +336,7 @@ export default function History() {
                 return (
                   <tr
                     key={`${entry.date}-${entry.project}`}
-                    className="border-b border-gray-100 hover:bg-gray-50"
+                    className={`border-b border-gray-100 hover:bg-gray-50${isToday ? ' bg-blue-100' : ''}`}
                   >
                     <td className="py-2 pr-4 tabular-nums text-gray-700">{entry.date}</td>
                     <td className="py-2 pr-4 text-gray-700">{entry.project}</td>

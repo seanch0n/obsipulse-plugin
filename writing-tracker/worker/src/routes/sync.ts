@@ -20,8 +20,13 @@ sync.post('/', async (c) => {
   if (!keyRow) return c.json({ error: 'Invalid API key' }, 401)
 
   const userId = keyRow.user_id
-  const body = await c.req.json<{ date?: string; projects?: Record<string, number> }>()
+  const body = await c.req.json<{
+    date?: string
+    device?: string
+    projects?: Record<string, number>
+  }>()
   const { date, projects } = body
+  const device = body.device || 'default'
 
   if (!date || !projects || typeof projects !== 'object') {
     return c.json({ error: 'date and projects are required' }, 400)
@@ -32,14 +37,14 @@ sync.post('/', async (c) => {
   }
 
   const statements = Object.entries(projects).map(([project, wordCount]) => {
-    const id = `${userId}:${date}:${project}`
+    const id = `${userId}:${date}:${project}:${device}`
     return c.env.DB.prepare(
       `
-      INSERT INTO daily_stats (id, user_id, date, project, word_count)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(user_id, date, project) DO UPDATE SET word_count = MAX(word_count, excluded.word_count)
+      INSERT INTO daily_stats (id, user_id, date, project, device, word_count)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, date, project, device) DO UPDATE SET word_count = excluded.word_count
     `
-    ).bind(id, userId, date, project, Math.max(0, Math.round(wordCount)))
+    ).bind(id, userId, date, project, device, Math.max(0, Math.round(wordCount)))
   })
 
   if (statements.length > 0) {

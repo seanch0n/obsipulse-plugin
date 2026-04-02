@@ -127,4 +127,53 @@ sprints.get('/', async (c) => {
   return c.json(rows.results)
 })
 
+sprints.put('/:id', async (c) => {
+  const userId = c.get('userId')
+  const id = c.req.param('id')
+
+  const body = await c.req.json<{
+    words_written?: number
+    goal_words?: number
+    goal_duration_minutes?: number
+    location?: string | null
+    completed?: boolean
+  }>()
+
+  const sprint = await c.env.DB.prepare('SELECT id FROM sprints WHERE id = ? AND user_id = ?')
+    .bind(id, userId)
+    .first()
+  if (!sprint) return c.json({ error: 'Not found' }, 404)
+
+  await c.env.DB.prepare(
+    `UPDATE sprints SET
+      words_written = COALESCE(?, words_written),
+      goal_words = COALESCE(?, goal_words),
+      goal_duration_minutes = COALESCE(?, goal_duration_minutes),
+      location = ?,
+      completed = COALESCE(?, completed)
+    WHERE id = ? AND user_id = ?`
+  )
+    .bind(
+      body.words_written ?? null,
+      body.goal_words ?? null,
+      body.goal_duration_minutes ?? null,
+      body.location !== undefined ? body.location : null,
+      body.completed != null ? (body.completed ? 1 : 0) : null,
+      id,
+      userId
+    )
+    .run()
+
+  return c.json({ ok: true })
+})
+
+sprints.delete('/:id', async (c) => {
+  const userId = c.get('userId')
+  const id = c.req.param('id')
+
+  await c.env.DB.prepare('DELETE FROM sprints WHERE id = ? AND user_id = ?').bind(id, userId).run()
+
+  return c.json({ ok: true })
+})
+
 export default sprints

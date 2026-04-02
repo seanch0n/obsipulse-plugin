@@ -24,6 +24,7 @@ export interface WritingTrackerSettings {
   locations: string[]
   defaultSprintMinutes: number
   defaultSprintWords: number
+  defaultCooldownMinutes: number
 }
 
 export interface SprintRecord {

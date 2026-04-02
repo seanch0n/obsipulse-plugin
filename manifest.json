@@ -1,9 +1,9 @@
 {
-  "id": "writing-tracker",
-  "name": "Writing Tracker",
+  "id": "stats-wkrust-tracker",
+  "name": "Stats WK Rust Tracker",
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
   "description": "Track your daily writing stats by project and sync them to your own backend.",
-  "author": "Sean",
+  "author": "wkrust",
   "isDesktopOnly": false
 }

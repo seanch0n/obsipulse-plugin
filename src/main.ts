@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS: WritingTrackerSettings = {
   locations: [],
   defaultSprintMinutes: 25,
   defaultSprintWords: 500,
+  defaultCooldownMinutes: 0,
 }
 
 class WritingTrackerSettingTab extends PluginSettingTab {
@@ -74,6 +75,68 @@ class WritingTrackerSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.apiKey = value.trim()
             await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(containerEl)
+      .setName('Test connection')
+      .setDesc('Verify that the server URL and API key are configured correctly.')
+      .addButton((btn) =>
+        btn
+          .setButtonText('Test')
+          .setCta()
+          .onClick(async () => {
+            const { serverUrl, apiKey } = this.plugin.settings
+
+            if (!serverUrl) {
+              new Notice('Server URL is not set.')
+              return
+            }
+            if (!apiKey) {
+              new Notice('API key is not set.')
+              return
+            }
+
+            btn.setButtonText('Testing...')
+            btn.setDisabled(true)
+
+            try {
+              // Step 1: Check server is reachable
+              try {
+                await requestUrl({ url: `${serverUrl}/health`, method: 'GET' })
+              } catch {
+                new Notice('Could not reach server. Check that the URL is correct.')
+                return
+              }
+
+              // Step 2: Validate API key by sending an empty sync (writes nothing)
+              try {
+                const resp = await requestUrl({
+                  method: 'POST',
+                  url: `${serverUrl}/api/sync`,
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${apiKey}`,
+                  },
+                  body: JSON.stringify({ date: '2000-01-01', projects: {} }),
+                })
+                if (resp.status === 200) {
+                  new Notice('Connection successful! Server URL and API key are valid.')
+                } else {
+                  new Notice(`Unexpected response (status ${resp.status}).`)
+                }
+              } catch (err: unknown) {
+                const status = (err as { status?: number })?.status
+                if (status === 401) {
+                  new Notice('Server reachable but API key is invalid.')
+                } else {
+                  new Notice(`API key check failed (status ${status ?? 'unknown'}).`)
+                }
+              }
+            } finally {
+              btn.setButtonText('Test')
+              btn.setDisabled(false)
+            }
           })
       )
 
@@ -172,6 +235,22 @@ class WritingTrackerSettingTab extends PluginSettingTab {
           })
       )
 
+    new Setting(containerEl)
+      .setName('Cooldown between sprints (minutes)')
+      .setDesc('Rest period automatically started after each sprint completes. 0 = no cooldown.')
+      .addText((text) =>
+        text
+          .setPlaceholder('0')
+          .setValue(String(this.plugin.settings.defaultCooldownMinutes ?? 0))
+          .onChange(async (value) => {
+            const parsed = parseInt(value)
+            if (!isNaN(parsed) && parsed >= 0) {
+              this.plugin.settings.defaultCooldownMinutes = parsed
+              await this.plugin.saveSettings()
+            }
+          })
+      )
+
     containerEl.createEl('h3', { text: 'Locations', cls: 'setting-item-heading' })
     containerEl.createEl('p', {
       text: 'Named locations (e.g. Home, Cafe, Library) to tag your writing sprints with.',
@@ -248,6 +327,63 @@ class WritingTrackerSettingTab extends PluginSettingTab {
         })
       )
 
+    new Setting(containerEl)
+      .setName('Reset today\u2019s word count')
+      .setDesc('Clear all tracked word counts for today. This cannot be undone.')
+      .addButton((btn) =>
+        btn
+          .setButtonText('Reset')
+          .setWarning()
+          .onClick(async () => {
+            // Collect all projects that had words today BEFORE clearing,
+            // so we can tell the server to set them to 0
+            const projectsToZero: Set<string> = new Set()
+            for (const deviceData of Object.values(this.plugin.settings.devices)) {
+              if (Object.prototype.hasOwnProperty.call(deviceData.dayCounts, this.plugin.today)) {
+                for (const [filepath, wc] of Object.entries(deviceData.todaysWordCount)) {
+                  const project = this.plugin.getProjectForFile(filepath)
+                  if (project !== null && wc.current - wc.initial !== 0) {
+                    projectsToZero.add(project)
+                  }
+                }
+                deviceData.dayCounts[this.plugin.today] = 0
+                deviceData.todaysWordCount = {}
+              }
+            }
+            this.plugin.currentWordCount = 0
+            this.plugin.updateStatusBarText()
+
+            // Send 0 for each project that was tracked today
+            if (projectsToZero.size > 0) {
+              const { serverUrl, apiKey } = this.plugin.settings
+              if (serverUrl && apiKey) {
+                const zeroProjects: Record<string, number> = {}
+                for (const p of projectsToZero) zeroProjects[p] = 0
+                try {
+                  await requestUrl({
+                    method: 'POST',
+                    url: `${serverUrl}/api/sync`,
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: `Bearer ${apiKey}`,
+                    },
+                    body: JSON.stringify({
+                      date: this.plugin.today,
+                      device: this.plugin.getDeviceName(),
+                      projects: zeroProjects,
+                    }),
+                  })
+                } catch (err) {
+                  console.error('[writing-tracker] reset sync failed', err)
+                }
+              }
+            }
+
+            await this.plugin.saveSettings()
+            new Notice('Today\u2019s word count has been reset.')
+          })
+      )
+
     new Setting(containerEl).setName('Version').setDesc(this.plugin.manifest.version)
   }
 }
@@ -262,8 +398,16 @@ export default class WritingTrackerPlugin extends Plugin {
 
   private hasCountChanged: boolean = false
   private deviceName: string
+  // Tracks files being actively edited locally (filepath → timestamp)
+  private recentLocalEdits = new Map<string, number>()
+  // Tracks last interval tick to detect sleep/wake
+  private lastTickTime: number = Date.now()
+  // When true, ignore quick-preview events (used after wake from sleep)
+  private suppressQuickPreview: boolean = false
+  // Tracks last keyboard/mouse interaction to distinguish local edits from sync
+  private lastUserInteraction: number = 0
 
-  private getDeviceName(): string {
+  getDeviceName(): string {
     if (this.deviceName) return this.deviceName
 
     try {
@@ -298,8 +442,8 @@ export default class WritingTrackerPlugin extends Plugin {
   }
 
   // Determines the project name for a file path.
-  // Returns null if the file should be ignored.
-  private getProjectForFile(filepath: string): string | null {
+  // Returns null if the file is ignored or not matched to any configured project.
+  getProjectForFile(filepath: string): string | null {
     const normalizedPath = filepath.replace(/\\/g, '/')
 
     for (const ignored of this.settings.ignoredPaths) {
@@ -333,24 +477,22 @@ export default class WritingTrackerPlugin extends Plugin {
       }
     }
 
-    return 'default'
+    return null
   }
 
   private getProjectWordCounts(): Record<string, number> {
     const counts: Record<string, number> = {}
 
-    // Sum across all devices that have been active today.
-    // Obsidian Sync shares the settings file, so other devices' data is available here.
-    for (const deviceData of Object.values(this.settings.devices)) {
-      // Skip devices that haven't tracked anything today
-      if (!Object.prototype.hasOwnProperty.call(deviceData.dayCounts, this.today)) continue
+    // Only count this device's words — the server stores per-device rows
+    // and sums them in the stats endpoints.
+    const deviceData = this.getLocalData()
+    if (!Object.prototype.hasOwnProperty.call(deviceData.dayCounts, this.today)) return counts
 
-      for (const [filepath, wc] of Object.entries(deviceData.todaysWordCount)) {
-        const project = this.getProjectForFile(filepath)
-        if (project === null) continue
-        const words = Math.max(0, wc.current - wc.initial)
-        if (words > 0) counts[project] = (counts[project] ?? 0) + words
-      }
+    for (const [filepath, wc] of Object.entries(deviceData.todaysWordCount)) {
+      const project = this.getProjectForFile(filepath)
+      if (project === null) continue
+      const words = Math.max(0, wc.current - wc.initial)
+      counts[project] = (counts[project] ?? 0) + words
     }
 
     return counts
@@ -382,24 +524,102 @@ export default class WritingTrackerPlugin extends Plugin {
     // Register sprint view
     this.registerView(SPRINT_VIEW_TYPE, (leaf) => new SprintView(leaf, this))
 
-    // File menu: Start Writing Sprint
+    // File menu: Open Sprint View
     this.registerEvent(
-      this.app.workspace.on('file-menu', (menu, file) => {
+      this.app.workspace.on('file-menu', (menu) => {
         menu.addItem((item) =>
           item
-            .setTitle('Start Writing Sprint')
+            .setTitle('Open Sprint View')
             .setIcon('timer')
-            .onClick(() => this.startSprint(file as TFile))
+            .onClick(() => this.openSprintView())
         )
       })
     )
 
+    // Track actual user interaction (keyboard/mouse) to distinguish local edits from Obsidian Sync.
+    // quick-preview fires for BOTH local typing and Sync file updates on open files,
+    // so we need a separate signal to know if the user is actually at the keyboard.
+    const onInteraction = () => {
+      this.lastUserInteraction = Date.now()
+    }
+    document.addEventListener('keydown', onInteraction)
+    document.addEventListener('mousedown', onInteraction)
+    this.register(() => {
+      document.removeEventListener('keydown', onInteraction)
+      document.removeEventListener('mousedown', onInteraction)
+    })
+
     this.registerEvent(this.app.workspace.on('quick-preview', this.onQuickPreview.bind(this)))
 
-    // Save and update date periodically
+    // Listen for file modifications to handle two cases:
+    // 1. Local edits (recent user interaction) → let quick-preview handle word count
+    // 2. Obsidian Sync changes (no recent user interaction) → rebase initial so delta stays correct
+    this.registerEvent(
+      this.app.vault.on('modify', async (file: TFile) => {
+        const lastEdit = this.recentLocalEdits.get(file.path) ?? 0
+        const isLocalEdit = Date.now() - lastEdit < 5000
+
+        if (isLocalEdit) {
+          // Local edit — let quick-preview handle it (already debounced)
+          return
+        }
+
+        // External change (Obsidian Sync) — rebase initial to prevent double-counting
+        this.ensureDeviceExists()
+        const deviceData = this.getLocalData()
+        if (!deviceData.dayCounts.hasOwnProperty(this.today)) return
+        if (!deviceData.todaysWordCount.hasOwnProperty(file.path)) return
+
+        const contents = await this.app.vault.cachedRead(file)
+        const newCount = this.getWordCount(contents)
+        const entry = deviceData.todaysWordCount[file.path]
+        // Shift initial by the same amount current changed, preserving only the local delta
+        const externalDelta = newCount - entry.current
+        entry.initial += externalDelta
+        entry.current = newCount
+        this.updateCounts()
+      })
+    )
+
+    // Save and update date periodically, and refresh other devices' data from disk
     this.registerInterval(
-      window.setInterval(() => {
+      window.setInterval(async () => {
+        const now = Date.now()
+        const elapsed = now - this.lastTickTime
+        this.lastTickTime = now
+
+        // Detect wake from sleep: if >30s passed since last tick, the computer was asleep.
+        // Rebase all tracked files so any Obsidian Sync changes during sleep don't count as local words.
+        if (elapsed > 30000) {
+          console.log(
+            `[writing-tracker] detected wake from sleep (${Math.round(elapsed / 1000)}s gap), rebasing word counts`
+          )
+          this.suppressQuickPreview = true
+          this.recentLocalEdits.clear()
+          await this.rebaseAllTrackedFiles()
+          // Allow quick-preview again after a short delay so any spurious wake events are ignored
+          setTimeout(() => {
+            this.suppressQuickPreview = false
+          }, 5000)
+        }
+
         this.updateDate()
+
+        // Refresh other devices' data from disk for accurate status bar totals
+        try {
+          const stored = await this.loadData()
+          if (stored?.devices) {
+            for (const [device, data] of Object.entries(stored.devices)) {
+              if (device === this.deviceName) continue
+              this.settings.devices[device] = data as DeviceData
+            }
+          }
+        } catch {
+          // ignore — next interval will retry
+        }
+
+        this.updateCounts()
+        this.updateStatusBarText()
         this.saveSettings()
       }, 5000)
     )
@@ -435,13 +655,13 @@ export default class WritingTrackerPlugin extends Plugin {
           this.hasCountChanged = false
           this.syncToServer()
         }
-      }, 30 * 1000)
+      }, 5 * 1000)
     )
 
     this.addSettingTab(new WritingTrackerSettingTab(this.app, this))
   }
 
-  async startSprint(file: TFile) {
+  async openSprintView() {
     const { workspace } = this.app
     let leaf = workspace.getRightLeaf(false)
     if (!leaf) {
@@ -449,9 +669,6 @@ export default class WritingTrackerPlugin extends Plugin {
     }
     await leaf.setViewState({ type: SPRINT_VIEW_TYPE, active: true })
     workspace.revealLeaf(leaf)
-
-    const view = leaf.view as SprintView
-    await view.initSprint(file)
   }
 
   async syncSprint(record: SprintRecord) {
@@ -508,9 +725,42 @@ export default class WritingTrackerPlugin extends Plugin {
   }
 
   onQuickPreview(file: TFile, contents: string) {
-    if (this.app.workspace.getActiveViewOfType(MarkdownView)) {
-      this.debouncedUpdate?.(contents, file.path)
+    if (this.suppressQuickPreview) return
+
+    // quick-preview fires for BOTH local typing AND Obsidian Sync updates to open files.
+    // Only treat it as a local edit if the user recently pressed a key or clicked.
+    // Without this check, Sync file updates on an idle machine get counted as local words.
+    const isUserActive = Date.now() - this.lastUserInteraction < 5000
+    if (!isUserActive) return
+
+    this.recentLocalEdits.set(file.path, Date.now())
+    this.debouncedUpdate?.(contents, file.path)
+  }
+
+  // Re-read all tracked files and rebase initial/current so that any external
+  // changes (e.g. Obsidian Sync during sleep) don't inflate the local delta.
+  private async rebaseAllTrackedFiles() {
+    this.ensureDeviceExists()
+    const deviceData = this.getLocalData()
+    if (!Object.prototype.hasOwnProperty.call(deviceData.dayCounts, this.today)) return
+
+    for (const [filepath, entry] of Object.entries(deviceData.todaysWordCount)) {
+      const abstractFile = this.app.vault.getAbstractFileByPath(filepath)
+      if (!(abstractFile instanceof TFile)) continue
+      try {
+        const contents = await this.app.vault.cachedRead(abstractFile)
+        const newCount = this.getWordCount(contents)
+        // Shift initial by the difference so the local delta is preserved
+        const externalDelta = newCount - entry.current
+        if (externalDelta !== 0) {
+          entry.initial += externalDelta
+          entry.current = newCount
+        }
+      } catch {
+        // File may have been deleted — ignore
+      }
     }
+    this.updateCounts()
   }
 
   getWordCount(text: string): number {
@@ -581,12 +831,7 @@ export default class WritingTrackerPlugin extends Plugin {
     const { serverUrl, apiKey } = this.settings
     if (!serverUrl || !apiKey) return
 
-    const deviceData = this.getLocalData()
-    console.log('[writing-tracker] todaysWordCount paths:', Object.keys(deviceData.todaysWordCount))
-    console.log('[writing-tracker] configured projects:', JSON.stringify(this.settings.projects))
-
     const projects = this.getProjectWordCounts()
-    console.log('[writing-tracker] computed project counts:', JSON.stringify(projects))
 
     if (Object.keys(projects).length === 0) return
 
@@ -598,7 +843,11 @@ export default class WritingTrackerPlugin extends Plugin {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ date: this.today, projects }),
+        body: JSON.stringify({
+          date: this.today,
+          device: this.getDeviceName(),
+          projects,
+        }),
       })
     } catch (err) {
       console.error('[writing-tracker] sync failed', err)

@@ -207,6 +207,24 @@ export interface SprintRecord {
   completed: number
 }
 
+export const updateSprint = (
+  id: string,
+  updates: {
+    words_written?: number
+    goal_words?: number
+    goal_duration_minutes?: number
+    location?: string | null
+    completed?: boolean
+  }
+) =>
+  request<{ ok: boolean }>(`/api/sprints/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(updates),
+  })
+
+export const deleteSprint = (id: string) =>
+  request<{ ok: boolean }>(`/api/sprints/${id}`, { method: 'DELETE' })
+
 export const getSprints = (year?: number, month?: number) => {
   if (year != null && month != null) {
     return request<SprintRecord[]>(`/api/sprints?year=${year}&month=${month}`)
